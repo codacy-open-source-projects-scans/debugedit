@@ -439,12 +439,43 @@ AT_CLEANUP
 
 # ===
 # Make sure -fdebug-types-section has updated strings in executable.
-# Currently only works with DWARF4
+# DWARF4
 # ===
-AT_SETUP([debugedit .debug_types exe])
+AT_SETUP([debugedit .debug_types exe DWARF4])
 AT_KEYWORDS([debugtypes] [debugedit])
 DEBUGEDIT_SETUP([-fdebug-types-section -gdwarf-4])
 AT_SKIP_IF([! $READELF -S ./foobarbaz.exe | grep -F -q '.debug_types'])
+
+AT_DATA([expout],
+[st1
+stb
+stf
+stringp1
+stringp_bar
+stringp_baz
+stringp_foo
+stz
+])
+
+AT_CHECK([[debugedit -b $(pwd) -d /foo/bar/baz ./foobarbaz.exe]])
+AT_CHECK([[
+$READELF --debug-dump=info ./foobarbaz.exe \
+        | awk '/Abbrev Number:.*DW_TAG_type_unit/{p=1}{if(p)print}/^$/{p=0}' \
+        | sed -n 's/^.*> *DW_AT_name *:.* \(stringp[^ ]*\|st.\)$/\1/p' \
+        | sort
+]],[0],[expout])
+
+AT_CLEANUP
+
+# ===
+# Make sure -fdebug-types-section has updated strings in executable.
+# DWARF5
+# ===
+AT_SETUP([debugedit .debug_types exe DWARF5])
+AT_KEYWORDS([debugtypes] [debugedit])
+DEBUGEDIT_SETUP([-fdebug-types-section -gdwarf-5])
+AT_SKIP_IF([test "$GDWARF_5_FLAG" = "no"])
+AT_SKIP_IF([! $READELF --debug-dump=info ./foobarbaz.exe | grep -F -q 'DW_TAG_type_unit'])
 
 AT_DATA([expout],
 [st1
@@ -716,4 +747,44 @@ echo "int main () { }" > main.c
 $CC $CFLAGS -gdwarf-5 -o main main.c
 AT_CHECK([[debugedit -l sources.list main]])
 AT_CHECK([[grep -q main.c sources.list]])
+AT_CLEANUP
+
+
+# ===
+# build-id recomputation
+# ===
+AT_SETUP([debugedit build-id recompute])
+AT_KEYWORDS([debuginfo] [debugedit] [build-id])
+
+# compile a test program and extract its linker-assigned build-id
+echo "int main () { }" > main.c
+$CC $CFLAGS -Wl,--build-id -o main main.c
+AT_CHECK([[$READELF -n main | grep Build.ID: | awk '{print $3}']], [0], [stdout], [ignore])
+bid="`cat stdout`"
+AT_CHECK([[expr "$bid" : '[0-9a-f]*']], [0], [ignore])
+
+# run debugedit to recompute build-id
+AT_CHECK([[debugedit -i -s deadbeef main]], [0], [stdout])
+bid2a="`cat stdout`"
+AT_CHECK([[expr "$bid2a" : '[0-9a-f]*']], [0], [ignore])
+AT_CHECK([[test "$bid" != "$bid2a"]])
+
+# check that debugedit's stdout matches readelf -n note
+AT_CHECK([[$READELF -n main | grep Build.ID: | awk '{print $3}']], [0], [stdout], [ignore])
+bid2b="`cat stdout`"
+AT_CHECK([[expr "$bid2b" : '[0-9a-f]*']], [0], [ignore])
+AT_CHECK([[test "$bid2a" == "$bid2b"]])
+
+# run debugedit to recompute build-id, check for idempotence
+AT_CHECK([[debugedit -i -s deadbeef main]], [0], [stdout])
+bid2c="`cat stdout`"
+AT_CHECK([[expr "$bid2c" : '[0-9a-f]*']], [0], [ignore])
+AT_CHECK([[test "$bid2a" == "$bid2c"]])
+
+# check that debugedit -i with different -s seed results in different valid build-id
+AT_CHECK([[debugedit -i -s zoofoo main]], [0], [stdout])
+bid3="`cat stdout`"
+AT_CHECK([[expr "$bid3" : '[0-9a-f]*']], [0], [ignore])
+AT_CHECK([[test "$bid3" != "$bid2a"]])
+
 AT_CLEANUP

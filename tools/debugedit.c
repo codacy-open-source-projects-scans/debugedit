@@ -30,6 +30,7 @@
 #include <limits.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include <unistd.h>
@@ -43,6 +44,9 @@
 
 #ifndef MAX
 #define MAX(m, n) ((m) < (n) ? (n) : (m))
+#endif
+#ifndef MIN
+#define MIN(m, n) ((m) > (n) ? (n) : (m))
 #endif
 
 
@@ -77,8 +81,8 @@ typedef struct Ebl_Strtab	Strtab;
 
 #include "tools/hashtab.h"
 
-#include "tools/md5.h"
-#include "tools/sha1.h"
+#define XXH_INLINE_ALL
+#include "xxhash.h"
 
 #define DW_TAG_partial_unit 0x3c
 #define DW_FORM_sec_offset 0x17
@@ -2628,10 +2632,13 @@ edit_info (DSO *dso, int phase, struct debug_section *sec)
 
       int cu_ptr_size = 0;
 
+      uint8_t unit_type = DW_UT_compile;
       if (cu_version >= 5)
 	{
-	  uint8_t unit_type = read_8 (ptr);
-	  if (unit_type != DW_UT_compile && unit_type != DW_UT_partial)
+	  unit_type = read_8 (ptr);
+	  if (unit_type != DW_UT_compile
+	      && unit_type != DW_UT_partial
+	      && unit_type != DW_UT_type)
 	    {
 	      error (0, 0, "%s: Unit type %u unhandled", dso->filename,
 		     unit_type);
@@ -2641,7 +2648,12 @@ edit_info (DSO *dso, int phase, struct debug_section *sec)
 	  cu_ptr_size = read_8 (ptr);
 	}
 
-      unsigned char *header_end = (cu_start + 23 + (cu_version < 5 ? 0 : 1));
+      unsigned char *header_end = (cu_start + 23
+				   + (cu_version < 5
+				      ? 0
+				      : (unit_type != DW_UT_type
+					 ? 1 /* unit */
+					 : 1 + 8 + 4))); /* unit, id, off */
       if (header_end > endsec)
 	{
 	  error (0, 0, "%s: %s CU header too small", dso->filename, sec->name);
@@ -2671,7 +2683,7 @@ edit_info (DSO *dso, int phase, struct debug_section *sec)
 
       cu->ptr_size = cu_ptr_size;
 
-      if (sec != &debug_sections[DEBUG_INFO])
+      if (sec != &debug_sections[DEBUG_INFO] || unit_type == DW_UT_type)
 	ptr += 12; /* Skip type_signature and type_offset.  */
 
       abbrev = read_abbrev (dso,
@@ -3423,10 +3435,10 @@ static void
 handle_build_id (DSO *dso, Elf_Data *build_id,
 		 size_t build_id_offset, size_t build_id_size)
 {
-  /* For now we only handle 16 byte (128 bits) with md5 or 20 bytes
-     (160 bits) with sha1.  */
-
-  if (build_id_size != 16 && build_id_size != 20)
+  /* Accept any build_id_size > 0.  Hashes will be truncated or padded
+     to the incoming note size, as debugedit cannot change their
+     size. */
+  if (build_id_size <= 0)
     {
       error (1, 0, "Cannot handle %zu-byte build ID", build_id_size);
     }
@@ -3436,25 +3448,24 @@ handle_build_id (DSO *dso, Elf_Data *build_id,
       || (! dirty_elf && build_id_seed == NULL))
     goto print;
 
-  /* Clear the old bits so they do not affect the new hash.  */
-  memset ((char *) build_id->d_buf + build_id_offset, 0, build_id_size);
+  /* Clear the bits about to be recomputed, so they do not affect the
+     new hash.  Extra bits left over from wider-than-128-bit hash are
+     preserved for extra entropy.  This computation should be
+     idempotent, so repeated rehashes (with the same seed) should
+     result in the same hash. */
+  XXH128_canonical_t result_canon;
+  memset ((char *) build_id->d_buf + build_id_offset, 0,
+          MIN (build_id_size, sizeof(result_canon)));
 
-  struct md5_ctx md5_ctx;
-  struct sha1_ctx sha1_ctx;
-
-  if (build_id_size == 16)
-    md5_init_ctx (&md5_ctx);
-  else
-    sha1_init_ctx (&sha1_ctx);
+  XXH3_state_t* state = XXH3_createState();
+  if (!state)
+    error (1, errno, "Failed to create xxhash state");
+  XXH3_128bits_reset (state);
 
   /* If a seed string was given use it to prime the hash.  */
   if (build_id_seed != NULL)
-    {
-      if (build_id_size == 16)
-	md5_process_bytes (build_id_seed, strlen (build_id_seed), &md5_ctx);
-      else
-	sha1_process_bytes (build_id_seed, strlen (build_id_seed), &sha1_ctx);
-    }
+    /* Another choice is XXH3_generateSecret. */
+    XXH3_128bits_update (state, build_id_seed, strlen (build_id_seed));
 
   /* Slurp the relevant header bits and section contents and feed them
      into the hash function.  The only bits we ignore are the offset
@@ -3493,10 +3504,7 @@ handle_build_id (DSO *dso, Elf_Data *build_id,
 	if (elf64_xlatetom (&x, &x, dso->ehdr.e_ident[EI_DATA]) == NULL)
 	  goto bad;
 
-	if (build_id_size == 16)
-	  md5_process_bytes (x.d_buf, x.d_size, &md5_ctx);
-	else
-	  sha1_process_bytes (x.d_buf, x.d_size, &sha1_ctx);
+        XXH3_128bits_update (state, x.d_buf, x.d_size);
       }
 
     x.d_type = ELF_T_SHDR;
@@ -3509,10 +3517,7 @@ handle_build_id (DSO *dso, Elf_Data *build_id,
 	  if (elf64_xlatetom (&x, &x, dso->ehdr.e_ident[EI_DATA]) == NULL)
 	    goto bad;
 
-	  if (build_id_size == 16)
-	    md5_process_bytes (x.d_buf, x.d_size, &md5_ctx);
-	  else
-	    sha1_process_bytes (x.d_buf, x.d_size, &sha1_ctx);
+          XXH3_128bits_update (state, x.d_buf, x.d_size);
 
 	  if (dso->shdr[i].sh_type != SHT_NOBITS)
 	    {
@@ -3520,26 +3525,17 @@ handle_build_id (DSO *dso, Elf_Data *build_id,
 	      if (d == NULL)
 		goto bad;
 
-	      if (build_id_size == 16)
-		md5_process_bytes (d->d_buf, d->d_size, &md5_ctx);
-	      else
-		sha1_process_bytes (d->d_buf, d->d_size, &sha1_ctx);
+              XXH3_128bits_update (state, d->d_buf, d->d_size);
 	    }
 	}
   }
 
-  /* Allocate the memory first to make sure alignment is correct. */
-  void *digest = malloc (build_id_size);
-  if (digest == NULL)
-    goto bad;
-
-  if (build_id_size == 16)
-    md5_finish_ctx (&md5_ctx, digest);
-  else
-    sha1_finish_ctx (&sha1_ctx, digest);
-
-  memcpy((unsigned char *)build_id->d_buf + build_id_offset, digest, build_id_size);
-  free(digest);
+  XXH128_hash_t result = XXH3_128bits_digest (state);
+  XXH3_freeState (state);
+  /* Use canonical-endianness output. */
+  XXH128_canonicalFromHash (&result_canon, result);
+  memcpy((unsigned char *)build_id->d_buf + build_id_offset, &result_canon,
+         MIN (build_id_size, sizeof(result_canon)));
 
   elf_flagdata (build_id, ELF_C_SET, ELF_F_DIRTY);
 
