@@ -19,19 +19,20 @@
 #include "config.h"
 #endif
 
-#include <string.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <sys/mman.h>
 #include <endian.h>
+#include <errno.h>
+#include <error.h>
+#include <fcntl.h>
+#include <gelf.h>
+#include <libelf.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <error.h>
-#include <libelf.h>
-#include <gelf.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #ifndef _
 #define _(x) x
@@ -43,9 +44,6 @@
 #endif
 
 static_assert (sizeof (unsigned long) >= sizeof (uint32_t));
-
-typedef int bool;
-static const bool false = 0, true = 1;
 
 /* This is bfd_calc_gnu_debuglink_crc32 from bfd/opncls.c.  */
 static unsigned long
