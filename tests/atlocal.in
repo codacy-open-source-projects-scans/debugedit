@@ -1,0 +1,22 @@
+# @configure_input@                                     -*- shell-script -*-
+# Configurable variable values for test suite.
+
+PATH=@abs_builddir@:@abs_top_builddir@:$top_srcdir:$srcdir:$PATH
+
+# We do use the CC and LD found by configure, but explicitly keep
+# CFLAGS and LDFLAGS empty because the tests use specific flags.
+CC="@CC@"
+CFLAGS=""
+LD="@LD@"
+AR="@AR@"
+LDFLAGS=""
+READELF="@READELF@"
+READELF_VERSION_OK="@READELF_VERSION_OK@"
+GDB_ADD_INDEX_CHECKS_OK="@GDB_ADD_INDEX_CHECKS_OK@"
+
+GDWARF_5_FLAG=@GDWARF_5_FLAG@
+GZ_NONE_FLAG=@GZ_NONE_FLAG@
+GZ_ZLIB_FLAG=@GZ_ZLIB_FLAG@
+DWARF_5_DEBUGLINE=@DWARF_5_DEBUGLINE@
+DWARF_5_DEBUGADDR=@DWARF_5_DEBUGADDR@
+DEBUG_MACRO_FLAG=@DEBUG_MACRO_FLAG@

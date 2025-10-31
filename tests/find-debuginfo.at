@@ -1,0 +1,400 @@
+# find-debuginfo.at: Tests for the find-debuginfo script
+#
+# Copyright (C) 2025 Red Hat Inc.
+# Copyright (C) 2025 Mark J. Wielaard <mark@klomp.org>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, see see <http://www.gnu.org/licenses/>.
+
+# Recommended usage for verbose logging to the console:
+# make check TESTSUITEFLAGS=-v
+
+# Tests for scripts/find-debuginfo.in
+AT_BANNER([find-debuginfo])
+
+# Show which find-debuginfo script we are testing
+AT_TESTED([find-debuginfo])
+
+m4_define([BUILDO],[[
+mkdir -p "$1"
+cp "${abs_srcdir}"/data/SOURCES/dupe.c "$1"
+$CC $CFLAGS -g3 -c "`pwd`/$1/dupe.c" -DFOO=$2 -o "$1/dupe.o"
+echo built "$1/dupe.o"
+]])
+
+
+# Check find-debuginfo --help doesn't crash and burn
+AT_SETUP([find-debuginfo help])
+AT_KEYWORDS([find-debuginfo] [help])
+AT_CHECK([find-debuginfo --help],[0],[ignore],[ignore])
+AT_CLEANUP
+
+
+AT_SETUP([find-debuginfo on .a])
+# skip if ar too old to support O, needed for all the .a tests below
+AT_SKIP_IF([ test -z "`ar 2>&1 | grep -F '[O]'`" ])
+# build a little .a
+export HOME=${PWD}
+BUILDO([subdir_foob],[foo])
+touch -t 197001010101 subdir_foob/dupe.o # set distinct timestamps
+BUILDO([subdir_barb],[bar])
+touch -t 197001020101 subdir_barb/dupe.o
+BUILDO([subdir_zo b],[jam])
+touch -t 197001030101 subdir_zo?b/dupe.o
+BUILDO([subdir_club],[pix])
+touch -t 197001040101 subdir_club/dupe.o
+mkdir -p subdir_build
+$AR rv subdir_build/dupes.a subdir_foob/dupe.o subdir_barb/dupe.o # without P, these duplicate members "/dupe.o"
+$AR qP subdir_build/dupes.a subdir_zo?b/dupe.o subdir_club/dupe.o # with P, these are subdirectoried members
+# NB: find-debuginfo can't handle file names with embedded whitespace, PR32862; find | xargs used here and there
+
+# list old .a contents
+AT_CHECK([$AR tPv subdir_build/dupes.a],[0],[stdout],[ignore])
+AT_CHECK([test `wc -l < stdout` -eq 4],[0],[ignore],[ignore])
+
+# expect original source tree refs
+AT_CHECK([$READELF --debug-dump=line subdir_build/dupes.a | grep `pwd`], [0], [stdout], [ignore])
+
+# run conversion, under bash -x tracing for fuller testing log
+AT_CHECK([[env RPM_BUILD_DIR=${PWD} RPM_BUILD_ROOT=${PWD} RPM_PACKAGE_NAME=pkg RPM_PACKAGE_VERSION=ver RPM_PACKAGE_RELEASE=rel RPM_ARCH=arch \
+               bash -x `command -v find-debuginfo` -S sourcefiles.list -v ${PWD}/subdir_build]], [0], [stdout], [ignore])
+
+# list new .a contents; ar tPv contains timestamps / subdirs, so not a good fit for AT_DATA() here
+AT_CHECK([$AR tPv subdir_build/dupes.a],[0],[stdout],[ignore])
+AT_CHECK([test `wc -l < stdout` -eq 4],[0],[ignore],[ignore])
+
+# expect non-empty source file list
+AT_CHECK([grep . ${PWD}/subdir_build/sourcefiles.list | tr '\0' '\n'], [0], [stdout], [ignore])
+
+# expect proper source tree
+AT_CHECK([$READELF --debug-dump=line subdir_build/dupes.a | grep /usr/src/debug], [0], [stdout], [ignore])
+
+# no traces of old source tree
+AT_CHECK([$READELF --debug-dump=line subdir_build/dupes.a | grep `pwd`], [1], [stdout], [stderr])
+AT_CLEANUP
+
+# Helper to create some test binaries
+m4_define([FIND_DEBUGINFO_PKG_BUILD_SETUP],[[
+mkdir subdir_build
+cp "${abs_srcdir}"/data/SOURCES/foo.c subdir_build
+cp "${abs_srcdir}"/data/SOURCES/bar.c subdir_build
+cp "${abs_srcdir}"/data/SOURCES/foobar.h subdir_build
+cp "${abs_srcdir}"/data/SOURCES/baz.c subdir_build
+cd subdir_build
+# Three almost identical binaries
+# so dwz has something to put into the alt file
+$CC $CFLAGS -Wl,--build-id -g3 -I. -o foo foo.c bar.c baz.c
+$CC $CFLAGS -Wl,--build-id -g3 -I. -o bar bar.c baz.c foo.c
+$CC $CFLAGS -Wl,--build-id -g3 -I. -o baz baz.c foo.c bar.c
+cd ..
+]])
+
+# Run find-debuginfo on a small build without any fancy options
+AT_SETUP([find-debuginfo sources])
+AT_KEYWORDS([find-debuginfo] [sources])
+FIND_DEBUGINFO_PKG_BUILD_SETUP
+# Sanity check the binaries have debug sections
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [0], [ignore], [])
+# We need to set some environment variables for running find-debuginfo
+# normally set by rpmbuild.
+#
+# run debugedit and collect source files for binaries in subdir_build
+AT_CHECK([env RPM_BUILD_DIR=${PWD} \
+              RPM_BUILD_ROOT=${PWD} \
+              RPM_PACKAGE_NAME=pkg \
+              RPM_PACKAGE_VERSION=ver \
+              RPM_PACKAGE_RELEASE=rel \
+              RPM_ARCH=arch \
+          find-debuginfo ${PWD}/subdir_build],
+         [0], [stdout], [])
+# Make sure all three binaries are processed
+AT_CHECK([grep "Extracting debug info from 3 files" stdout], [0], [ignore], [])
+# debug sections should have been removed
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [1], [ignore], [])
+# Now there are .debug files with those .debug_ sections
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/foo.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/bar.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/baz.debug | grep debug_],
+         [0], [ignore], [])
+# Check all sources are listed in debugsources.list
+AT_DATA([expout],
+[subdir_build/
+subdir_build/bar.c
+subdir_build/baz.c
+subdir_build/foo.c
+subdir_build/foobar.h
+])
+AT_CHECK([cat subdir_build/debugsources.list | tr '\0' '\n' | sort -u],
+         [0], [expout], [])
+AT_CLEANUP
+
+# Run find-debuginfo on a small build and check all parts ran
+AT_SETUP([find-debuginfo sources debugdata gdb-index])
+AT_KEYWORDS([find-debuginfo] [sources] [debugdata] [gdb-index])
+FIND_DEBUGINFO_PKG_BUILD_SETUP
+# Sanity check the binaries have debug sections
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [0], [ignore], [])
+# We need to set some environment variables for running find-debuginfo
+# normally set by rpmbuild.
+#
+# generate .gnu_debugdata (-m), .gdb_index (-i) for binaries in subdir_build.
+AT_CHECK([env RPM_BUILD_DIR=${PWD} \
+              RPM_BUILD_ROOT=${PWD} \
+              RPM_PACKAGE_NAME=pkg \
+              RPM_PACKAGE_VERSION=ver \
+              RPM_PACKAGE_RELEASE=rel \
+              RPM_ARCH=arch \
+          find-debuginfo -m -i ${PWD}/subdir_build],
+         [0], [stdout], [])
+# Make sure all three binaries are processed
+AT_CHECK([grep "Extracting debug info from 3 files" stdout], [0], [ignore], [])
+# debug sections should have been removed
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [1], [ignore], [])
+# But they now have a .gnu_debugdata section
+AT_CHECK([$READELF -S subdir_build/foo | grep gnu_debugdata],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep gnu_debugdata],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep gnu_debugdata],
+         [0], [ignore], [])
+# There are .debug files with those .debug_ sections
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/foo.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/bar.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/baz.debug | grep debug_],
+         [0], [ignore], [])
+# The .debug files should also have a .gdb_index sections
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/foo.debug | grep gdb_index],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/bar.debug | grep gdb_index],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/baz.debug | grep gdb_index],
+         [0], [ignore], [])
+# Check all sources are listed in debugsources.list
+AT_DATA([expout],
+[subdir_build/
+subdir_build/bar.c
+subdir_build/baz.c
+subdir_build/foo.c
+subdir_build/foobar.h
+])
+AT_CHECK([cat subdir_build/debugsources.list | tr '\0' '\n' | sort -u],
+         [0], [expout], [])
+AT_CLEANUP
+
+# Run find-debuginfo on a small build and check all parts ran
+# Same as above but run in parallel (-j)
+AT_SETUP([find-debuginfo sources debugdata gdb-index jobs])
+AT_KEYWORDS([find-debuginfo] [sources] [debugdata] [gdb-index] [jobs])
+FIND_DEBUGINFO_PKG_BUILD_SETUP
+# Sanity check the binaries have debug sections
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [0], [ignore], [])
+# We need to set some environment variables for running find-debuginfo
+# normally set by rpmbuild.
+#
+# generate .gnu_debugdata (-m), .gdb_index (-i) for binaries in subdir_build.
+AT_CHECK([env RPM_BUILD_DIR=${PWD} \
+              RPM_BUILD_ROOT=${PWD} \
+              RPM_PACKAGE_NAME=pkg \
+              RPM_PACKAGE_VERSION=ver \
+              RPM_PACKAGE_RELEASE=rel \
+              RPM_ARCH=arch \
+          find-debuginfo -m -i -j6 ${PWD}/subdir_build],
+         [0], [stdout], [])
+# Make sure all three binaries are processed
+AT_CHECK([grep "Extracting debug info from 3 files" stdout], [0], [ignore], [])
+# debug sections should have been removed
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [1], [ignore], [])
+# But they now have a .gnu_debugdata section
+AT_CHECK([$READELF -S subdir_build/foo | grep gnu_debugdata],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep gnu_debugdata],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep gnu_debugdata],
+         [0], [ignore], [])
+# There are .debug files with those .debug_ sections
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/foo.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/bar.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/baz.debug | grep debug_],
+         [0], [ignore], [])
+# The .debug files should also have a .gdb_index sections
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/foo.debug | grep gdb_index],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/bar.debug | grep gdb_index],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/baz.debug | grep gdb_index],
+         [0], [ignore], [])
+# Check all sources are listed in debugsources.list
+AT_DATA([expout],
+[subdir_build/
+subdir_build/bar.c
+subdir_build/baz.c
+subdir_build/foo.c
+subdir_build/foobar.h
+])
+AT_CHECK([cat subdir_build/debugsources.list | tr '\0' '\n' | sort -u],
+         [0], [expout], [])
+AT_CLEANUP
+
+# Run find-debuginfo on a small build and check all parts ran
+# Same as above, but now with dwz (but without -j)
+AT_SETUP([find-debuginfo sources debugdata gdb-index dwz])
+AT_KEYWORDS([find-debuginfo] [sources] [debugdata] [gdb-index] [dwz])
+# At the moment dwz doesn't support .debug_addr
+AT_SKIP_IF([test "$DWARF_5_DEBUGADDR" = "yes"])
+# Too new gdb with too old gdb
+AT_SKIP_IF([test "$GDB_ADD_INDEX_CHECKS_OK" = "no"])
+FIND_DEBUGINFO_PKG_BUILD_SETUP
+# Sanity check the binaries have debug sections
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [0], [ignore], [])
+# We need to set some environment variables for running find-debuginfo
+# normally set by rpmbuild.
+#
+# generate .gnu_debugdata (-m), .gdb_index (-i) and run dwz (--run-dwz)
+# for binaries in subdir_build.
+AT_CHECK([env RPM_BUILD_DIR=${PWD} \
+              RPM_BUILD_ROOT=${PWD} \
+              RPM_PACKAGE_NAME=pkg \
+              RPM_PACKAGE_VERSION=ver \
+              RPM_PACKAGE_RELEASE=rel \
+              RPM_ARCH=arch \
+          find-debuginfo -m -i --run-dwz ${PWD}/subdir_build],
+         [0], [stdout], [])
+# Make sure all three binaries are processed
+AT_CHECK([grep "Extracting debug info from 3 files" stdout], [0], [ignore], [])
+AT_CHECK([grep "DWARF-compressing 3 files" stdout], [0], [ignore], [])
+# debug sections should have been removed
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [1], [ignore], [])
+# But they now have a .gnu_debugdata section
+AT_CHECK([$READELF -S subdir_build/foo | grep gnu_debugdata],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep gnu_debugdata],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep gnu_debugdata],
+         [0], [ignore], [])
+# There are .debug files with those .debug_ sections
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/foo.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/bar.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/baz.debug | grep debug_],
+         [0], [ignore], [])
+# The .debug files should also have a .gdb_index sections
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/foo.debug | grep gdb_index],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/bar.debug | grep gdb_index],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/baz.debug | grep gdb_index],
+         [0], [ignore], [])
+# There should also be a dwz multi file now
+AT_CHECK([test -f usr/lib/debug/.dwz/pkg-ver-rel.arch], [0], [], [])
+# Check all sources are listed in debugsources.list
+AT_DATA([expout],
+[subdir_build/
+subdir_build/bar.c
+subdir_build/baz.c
+subdir_build/foo.c
+subdir_build/foobar.h
+])
+AT_CHECK([cat subdir_build/debugsources.list | tr '\0' '\n' | sort -u],
+         [0], [expout], [])
+AT_CLEANUP
+
+# Run find-debuginfo on a small build and check all parts ran
+# Same as above plus doing -j jobs
+AT_SETUP([find-debuginfo sources debugdata gdb-index dwz jobs])
+AT_KEYWORDS([find-debuginfo] [sources] [debugdata] [gdb-index] [dwz] [jobs])
+# At the moment dwz doesn't support .debug_addr
+AT_SKIP_IF([test "$DWARF_5_DEBUGADDR" = "yes"])
+# Too new gdb with too old gdb
+AT_SKIP_IF([test "$GDB_ADD_INDEX_CHECKS_OK" = "no"])
+FIND_DEBUGINFO_PKG_BUILD_SETUP
+# Sanity check the binaries have debug sections
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [0], [ignore], [])
+# We need to set some environment variables for running find-debuginfo
+# normally set by rpmbuild.
+#
+# generate .gnu_debugdata (-m), .gdb_index (-i) and run dwz (--run-dwz)
+# in parallel (-j6) for binaries in subdir_build.
+AT_CHECK([env RPM_BUILD_DIR=${PWD} \
+              RPM_BUILD_ROOT=${PWD} \
+              RPM_PACKAGE_NAME=pkg \
+              RPM_PACKAGE_VERSION=ver \
+              RPM_PACKAGE_RELEASE=rel \
+              RPM_ARCH=arch \
+          find-debuginfo -m -i --run-dwz -j6 ${PWD}/subdir_build],
+         [0], [stdout], [])
+# Make sure all three binaries are processed
+AT_CHECK([grep "Extracting debug info from 3 files" stdout], [0], [ignore], [])
+AT_CHECK([grep "DWARF-compressing 3 files" stdout], [0], [ignore], [])
+# debug sections should have been removed
+AT_CHECK([$READELF -S subdir_build/foo | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep debug_], [1], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep debug_], [1], [ignore], [])
+# But they now have a .gnu_debugdata section
+AT_CHECK([$READELF -S subdir_build/foo | grep gnu_debugdata],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/bar | grep gnu_debugdata],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S subdir_build/baz | grep gnu_debugdata],
+         [0], [ignore], [])
+# There are .debug files with those .debug_ sections
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/foo.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/bar.debug | grep debug_],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/baz.debug | grep debug_],
+         [0], [ignore], [])
+# The .debug files should also have a .gdb_index sections
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/foo.debug | grep gdb_index],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/bar.debug | grep gdb_index],
+         [0], [ignore], [])
+AT_CHECK([$READELF -S usr/lib/debug/subdir_build/baz.debug | grep gdb_index],
+         [0], [ignore], [])
+# There should also be a dwz multi file now
+AT_CHECK([test -f usr/lib/debug/.dwz/pkg-ver-rel.arch], [0], [], [])
+# Check all sources are listed in debugsources.list
+AT_DATA([expout],
+[subdir_build/
+subdir_build/bar.c
+subdir_build/baz.c
+subdir_build/foo.c
+subdir_build/foobar.h
+])
+AT_CHECK([cat subdir_build/debugsources.list | tr '\0' '\n' | sort -u],
+         [0], [expout], [])
+AT_CLEANUP
