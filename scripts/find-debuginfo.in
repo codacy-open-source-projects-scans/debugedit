@@ -33,6 +33,7 @@ Options:
 [-j N] [--jobs N]
 [-o debugfiles.list]
 [-S debugsourcefiles.list]
+[-O PATH] [--output-dir PATH]
 [--run-dwz] [--dwz-low-mem-die-limit N]
 [--dwz-max-die-limit N]
 [--dwz-single-file-mode]
@@ -73,6 +74,10 @@ an additional output file with the debuginfo for the files in
 the -l filelist file, or whose names match the -p pattern.
 The -p argument is an grep -E -style regexp matching the a file name,
 and must not use anchors (^ or $).
+
+The -O or --output-dir PATH flag instructs find-debuginfo to store all output
+files in the PATH directory. If not given, all output files will be stored in
+builddir.
 
 The --run-dwz flag instructs find-debuginfo to run the dwz utility
 if available, and --dwz-low-mem-die-limit and --dwz-max-die-limit
@@ -174,6 +179,9 @@ quiet=false
 # add more non-error output
 verbose=false
 
+# set before processing ar files
+dd_skip_bytes=
+
 # process static libraries if ar is new enough (binutils 2.31+) to support O
 if [ -n "`ar 2>&1 | grep -F '[O]'`" ]; then
     process_ar=true
@@ -183,6 +191,7 @@ fi
 
 
 BUILDDIR=.
+OUTDIR=
 out=debugfiles.list
 srcout=
 nout=0
@@ -239,6 +248,10 @@ while [ $# -gt 0 ]; do
       outs[$nout]=$2
       ((nout++))
     fi
+    shift
+    ;;
+  -O|--output-dir)
+    OUTDIR=$2
     shift
     ;;
   -l)
@@ -330,22 +343,25 @@ fi
 
 $quiet || echo "find-debuginfo: starting" 2>&1
 
+[ -z "$OUTDIR" ] && OUTDIR=$BUILDDIR
+
 i=0
 while ((i < nout)); do
-  outs[$i]="$BUILDDIR/${outs[$i]}"
+  outs[$i]="$OUTDIR/${outs[$i]}"
   l=''
   for f in ${lists[$i]}; do
-    l="$l $BUILDDIR/$f"
+    l="$l $OUTDIR/$f"
   done
   lists[$i]=$l
   ((++i))
 done
 
-LISTFILE="$BUILDDIR/$out"
-SOURCEFILE="$BUILDDIR/debugsources.list"
-LINKSFILE="$BUILDDIR/debuglinks.list"
-ELFBINSFILE="$BUILDDIR/elfbins.list"
+LISTFILE="$OUTDIR/$out"
+SOURCEFILE="$OUTDIR/debugsources.list"
+LINKSFILE="$OUTDIR/debuglinks.list"
+ELFBINSFILE="$OUTDIR/elfbins.list"
 
+mkdir -p "$OUTDIR"
 > "$SOURCEFILE"
 > "$LISTFILE"
 > "$LINKSFILE"
@@ -539,7 +555,14 @@ do_ar_file()
           # is hard, in case the same name exists multiple times.  A
           # distinct instance-number would have to be given to ar ("N ###"),
           # kept on a per-name basis.
-          (cd "$tmpdir"; dd status=none if="$f" of="$member_dn$member_bn" bs=1 skip="$offset" count="$size")
+          (cd "$tmpdir";
+           if [ "$dd_skip_bytes" = "yes" ]; then
+	    # Use blocksize of 64k, skip and count are still in bytes.
+            dd status=none if="$f" of="$member_dn$member_bn" bs=64k skip="$offset" count="$size" iflag=skip_bytes,count_bytes
+           else
+	    # Use blocksize of 1 bytes, because skip and count are in blocks.
+            dd status=none if="$f" of="$member_dn$member_bn" bs=1 skip="$offset" count="$size"
+           fi)
           if [ $? -ne 0 ]; then
               res=1
           fi
@@ -600,9 +623,21 @@ do_file()
 
   local ar_re="^.*\.a$"
   if [[ $f =~ $ar_re ]]; then # treat as static archive
+      # Make sure to test once if dd supports the skip_bytes flag.
+      if [ -z "$dd_skip_bytes" ]; then
+        if dd status=none iflag=skip_bytes,count_bytes if=/dev/null &>/dev/null; then
+           dd_skip_bytes="yes"
+        else
+           dd_skip_bytes="no"
+        fi
+      fi
       # Sanity check the ar file, skip if it doesn't have debuginfo
       # or too many members.
-      classify_opts="-m 768"
+      if [ "$dd_skip_bytes" = "yes" ]; then
+          classify_opts="-m 7168"
+      else
+          classify_opts="-m 768"
+      fi
       $verbose && classify_opts="$classify_opts --verbose"
       $quiet && classify_opts="$classify_opts --quiet"
       if debugedit-classify-ar $classify_opts "$f"; then
@@ -888,7 +923,7 @@ if [ -d "${RPM_BUILD_ROOT}/usr/lib" ] || [ -d "${RPM_BUILD_ROOT}/usr/src" ]; the
 fi
 
 if [ -n "$srcout" ]; then
-  srcout="$BUILDDIR/$srcout"
+  srcout="$OUTDIR/$srcout"
   > "$srcout"
   if [ -d "${RPM_BUILD_ROOT}/usr/src/debug" ]; then
     (cd "${RPM_BUILD_ROOT}/usr"
