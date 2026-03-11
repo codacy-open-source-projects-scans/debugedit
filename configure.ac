@@ -17,7 +17,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 AC_PREREQ([2.69])
-AC_INIT([debugedit], [5.2], [debugedit@sourceware.org])
+AC_INIT([debugedit], [5.3], [debugedit@sourceware.org])
 AC_CONFIG_SRCDIR([tools/debugedit.c])
 AC_CONFIG_HEADERS([config.h])
 
@@ -42,6 +42,7 @@ AC_USE_SYSTEM_EXTENSIONS
 AC_PROG_AWK
 AC_PROG_SED
 m4_version_prereq([2.70], [AC_PROG_CC], [AC_PROG_CC_C99])
+AC_PROG_CXX
 AC_PROG_LN_S
 AC_CHECK_TOOL([LD], [ld])
 AC_CHECK_TOOL([READELF], [readelf])
